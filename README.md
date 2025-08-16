@@ -1,4 +1,4 @@
-# Atlantis Bot 2
+# Atlantis Bot 3x
 
 ![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![Node.js](https://img.shields.io/badge/node.js-16+-green.svg)
