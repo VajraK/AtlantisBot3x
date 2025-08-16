@@ -69,7 +69,7 @@ async def analyze_txt_file(filepath: str) -> str:
             response = openai.chat.completions.create(
                 model="gpt-4.1",
                 messages=[
-                    {"role": "system", "content": "You are a financial analyst specializing in private investment rounds before IPO."},
+                    {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": full_prompt}
                 ],
                 max_tokens=1000,
@@ -113,7 +113,7 @@ async def analyze_txt_file(filepath: str) -> str:
         final_response = openai.chat.completions.create(
             model="gpt-4.1",
             messages=[
-                {"role": "system", "content": "You are a financial analyst specializing in private investment rounds before IPO."},
+                {"role": "system", "content": "You are a halpful assistant."},
                 {"role": "user", "content": final_prompt}
             ],
             max_tokens=1000,
