@@ -49,7 +49,7 @@ function buildSearchUrl(query, start = 0, timeRange = null) {
   return baseUrl;
 }
 
-async function scrapeGoogleResults(query, pagesLimitFromInput, folderPath) {
+async function scrapeGoogleResults(query, pagesLimitFromInput, folderPath, timeRange = null) {
   // Ensure the target folder exists
   fs.mkdirSync(folderPath, { recursive: true });
 
@@ -89,8 +89,15 @@ async function scrapeGoogleResults(query, pagesLimitFromInput, folderPath) {
       const url = buildSearchUrl(query, currentPage * 10, timeRange);
       console.error(`🌐 Navigating to page ${currentPage + 1} (time range: ${timeRange || 'any'}): ${url}`);
 
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 180000 });
-      await delay(5000, 'Initial page load');
+      try {
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 180000 });
+        await delay(5000, 'Initial page load');
+      } catch (err) {
+        console.error(`❌ Navigation failed: ${err.message}`);
+        await page.screenshot({ path: path.join(folderPath, `navigation-failure-page-${currentPage + 1}.png`) });
+        currentPage++;
+        continue;
+      }
 
       // 🔁 CAPTCHA loop
       let captchaLoopCount = 0;
