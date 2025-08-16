@@ -1,0 +1,44 @@
+telegram_bot_token: "x"
+telegram_chat_id: "-0"
+google:
+  queries:
+    - '("seeking funding" OR "raising capital" OR "investment opportunity" OR "raising funds" OR "Series A" OR "Series B" OR "Series C" OR "Series D" OR "pitch deck" OR "investor deck" OR "investment memo" OR "confidential investor deck") filetype:pdf (site:*.com OR site:*.org OR site:*.ai OR site:*.io OR site:*.xyz OR site:*.network OR site:*.tech OR site:*.app OR site:*.finance OR site:*.capital OR site:*.fund OR site:*.ventures OR site:*.foundation OR site:*.global OR site:*.vc OR site:*.co OR site:*.co.uk)'
+    #- '("seeking funding" OR "raising capital" OR "investment opportunity" OR "raising funds" OR "Series A" OR "Series B" OR "Series C" OR "Series D" OR "pitch deck" OR "investor deck" OR "investment memo" OR "confidential investor deck" OR "mergers and acquisitions" OR "M&A opportunity" OR "M&A deal" OR "acquisition opportunity" OR "strategic acquisition" OR "merger proposal" OR "acquisition proposal" OR "company for sale" OR "sell-side mandate" OR "buy-side mandate" OR "investment teaser" OR "confidential information memorandum" OR "CIM" OR "deal overview" OR "transaction memo") filetype:pdf (site:*.com OR site:*.org OR site:*.ai OR site:*.io OR site:*.xyz OR site:*.network OR site:*.tech OR site:*.app OR site:*.finance OR site:*.capital OR site:*.fund OR site:*.ventures OR site:*.foundation OR site:*.global OR site:*.vc OR site:*.co OR site:*.co.uk)'
+  pages_limit: 7
+openai:
+  api_key: "sk-x"
+twoCaptchaApiKey: "x"
+schedule:
+  hour: 0
+  minute: 0
+prompt: |
+  Analyze the following former-PDF for any private investment opportunities that are still relevant as of {{current_date}}.
+
+  Here's exactly what we're looking for:
+  - Private investment opportunities only (Private Equity Raises, Dept Needs, Startup Funding, PIPEs, pre-IPO rounds, convertible notes, bridge rounds, but also M&A)
+  - They must still be open, pending, or at least possibly active as of today
+  - Skip any public offerings or opportunities that are fully closed
+  - Only opportunities raising $1M+ are of interest to us; and if it's real estate, only $15M+ 
+
+  Important:
+  - Where possible, extract and include the **specific raise amount** (e.g. "$2.3M", "₹250 crore", "€15M"); **do not use vague terms like “$1M+” unless no exact figure is available**
+  - If amount is unclear or not explicitly stated, infer conservatively and flag it as "undisclosed est. >$1M" or similar
+
+  Please return only **one block**, in **under 120 words total**, and inside that block:
+  - Summarize each opportunity as a bullet point (1–3 short ones is fine)
+  - Make it readable and quick to scan, short phrases - no full sentences
+
+  If there are **no such private investment opportunities**, respond only with:
+
+  X
+
+  If there **is** something relevant, respond in this exact format (and only this format):
+
+  Company: [Name of the company]
+
+  Opportunity:
+  - [Short summary of opportunity 1]
+  - [Short summary of opportunity 2]
+  - ...
+
+  Who to contact: [e.g. "Company directly", "Placement agent mentioned", "No contact listed"]

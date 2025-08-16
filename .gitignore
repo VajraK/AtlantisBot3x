@@ -1,0 +1,8 @@
+/__pycache__/
+/venv/
+/node_modules/
+/pages/
+config.yaml
+package.json
+package-lock.json
+main.log*

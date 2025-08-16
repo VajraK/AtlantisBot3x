@@ -1,0 +1,1051 @@
+ai_api.py:
+import re
+import json
+import os
+import openai
+import yaml
+import logging
+from typing import List
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def load_config(path="config.yaml"):
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+def clean_json_response(text: str) -> str:
+    """
+    Remove markdown code fences (``` or ```json) wrapping the JSON.
+    Also strip any leading/trailing whitespace.
+    """
+    text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+def format_prompt(entries: List[dict]) -> str:
+    config = load_config()
+    base_prompt = config.get("prompt0", "")
+    prompt = base_prompt + "\n\nItems:\n"
+    for entry in entries:
+        prompt += (
+            f"\nHash: {entry['hash']}\n"
+            f"Title: {entry['name']}\n"
+            f"Description: {entry['description']}\n"
+            f"URL: {entry['url']}\n"
+        )
+    return prompt
+
+async def rate_entries_with_gpt(entries: List[dict], batch_size=10, model="gpt-4o", temperature=0.2):
+    config = load_config()
+    api_key = config.get("openai", {}).get("api_key")
+    if not api_key:
+        raise ValueError("Missing OpenAI API key in config.yaml")
+
+    openai.api_key = api_key
+    results = {}
+
+    for i in range(0, len(entries), batch_size):
+        batch = entries[i:i + batch_size]
+        prompt = format_prompt(batch)
+
+        try:
+            logger.info(f"⏳ Sending batch {i // batch_size + 1} to OpenAI...")
+            response = openai.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful financial analyst."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,
+                max_tokens=1000
+            )
+            raw_content = response.choices[0].message.content
+            cleaned_content = clean_json_response(raw_content)
+            parsed = json.loads(cleaned_content)
+            results.update(parsed)
+            logger.info(f"✅ Got results for batch {i // batch_size + 1}")
+
+        except json.JSONDecodeError as jde:
+            logger.error(f"❌ JSON decode error on batch {i // batch_size + 1}: {jde}")
+            logger.error(f"Raw response was:\n{raw_content}")
+        except Exception as e:
+            logger.error(f"❌ Error processing batch {i // batch_size + 1}: {e}")
+
+    return results
+
+
+ai_api_final.py:
+import os
+import re
+import yaml
+import logging
+import tiktoken
+import openai
+from datetime import datetime
+from bs4 import BeautifulSoup
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+MAX_INPUT_TOKENS = 25000
+CHUNK_TOKENS = 10000
+MAX_CHUNKS = 5
+
+def load_config(path="config.yaml"):
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+def clean_response_text(text: str) -> str:
+    text = re.sub(r'^\s*```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```\s*$', '', text, flags=re.IGNORECASE)
+    return text.strip()
+
+def chunk_text(text, max_chunk_tokens=CHUNK_TOKENS, model="gpt-4o-mini"):
+    encoding = tiktoken.encoding_for_model(model)
+    tokens = encoding.encode(text)
+    chunks = []
+    for i in range(0, len(tokens), max_chunk_tokens):
+        chunk_tokens = tokens[i:i+max_chunk_tokens]
+        chunk_text = encoding.decode(chunk_tokens)
+        chunks.append(chunk_text)
+    return chunks[:MAX_CHUNKS]
+
+async def analyze_txt_file(filepath: str) -> str:
+    config = load_config()
+    api_key = config.get("openai", {}).get("api_key")
+    prompt_template = config.get("prompt")
+
+    if not api_key:
+        logger.error("OpenAI API key not found.")
+        return None
+    if not prompt_template:
+        logger.error("Prompt not found in config.yaml.")
+        return None
+
+    openai.api_key = api_key
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            soup = BeautifulSoup(f, "html.parser")
+            text = soup.get_text(separator="\n").strip()
+    except Exception as e:
+        logger.error(f"Error reading file {filepath}: {e}")
+        return None
+
+    encoding = tiktoken.encoding_for_model("gpt-4o-mini")
+    tokens = encoding.encode(text)
+
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    prompt_filled = prompt_template.replace("{{current_date}}", current_date)
+
+    if len(tokens) <= MAX_INPUT_TOKENS:
+        # Small enough to go directly to GPT-4.1
+        full_prompt = prompt_filled + "\n\nHere is the document:\n\n" + text
+        try:
+            logger.info(f"📤 Sending full document to GPT-4.1: {filepath}")
+            response = openai.chat.completions.create(
+                model="gpt-4.1",
+                messages=[
+                    {"role": "system", "content": "You are a financial analyst specializing in private investment rounds before IPO."},
+                    {"role": "user", "content": full_prompt}
+                ],
+                max_tokens=1000,
+                temperature=0.2,
+            )
+            return clean_response_text(response.choices[0].message.content)
+        except Exception as e:
+            logger.error(f"OpenAI API error (GPT-4.1): {e}")
+            return None
+
+    # Too big — summarize chunks with mini model
+    chunks = chunk_text(text)
+    summaries = []
+
+    for i, chunk in enumerate(chunks, 1):
+        summary_prompt = (
+            f"Summarize this document chunk (part {i}/{len(chunks)}) "
+            f"with a focus on private investment opportunities:\n\n{chunk}"
+        )
+        try:
+            logger.info(f"🧩 Summarizing chunk {i}/{len(chunks)} with gpt-4o-mini...")
+            response = openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant specialized in summarizing financial documents."},
+                    {"role": "user", "content": summary_prompt}
+                ],
+                max_tokens=500,
+                temperature=0.3,
+            )
+            summaries.append(clean_response_text(response.choices[0].message.content))
+        except Exception as e:
+            logger.error(f"Error summarizing chunk {i}: {e}")
+            summaries.append(f"❌ Error summarizing chunk {i}")
+
+    combined = "\n\n".join(summaries)
+    final_prompt = prompt_filled + "\n\nHere is the combined summary:\n\n" + combined
+
+    try:
+        logger.info(f"📤 Sending combined summary to GPT-4.1 for final analysis...")
+        final_response = openai.chat.completions.create(
+            model="gpt-4.1",
+            messages=[
+                {"role": "system", "content": "You are a financial analyst specializing in private investment rounds before IPO."},
+                {"role": "user", "content": final_prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.2,
+        )
+        return clean_response_text(final_response.choices[0].message.content)
+    except Exception as e:
+        logger.error(f"OpenAI API error (final summary): {e}")
+        return None
+
+
+extract_google_results.py:
+import os
+import glob
+import json
+import yaml
+from bs4 import BeautifulSoup
+import hashlib
+
+def generate_hash(name, url, description):
+    # Combine fields into one string
+    combined = f"{name}|{url}|{description}"
+    # Create SHA-256 hash and return as hex string (shortened if you want)
+    return hashlib.sha256(combined.encode('utf-8')).hexdigest()[:16]  # 16 chars for brevity
+
+def extract_results_from_html(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    results = []
+
+    containers = soup.select('div.tF2Cxc')
+
+    for g in containers:
+        title_tag = g.select_one('h3')
+        if not title_tag:
+            continue
+        title = title_tag.get_text(strip=True)
+
+        link_tag = g.select_one('a')
+        if not link_tag or not link_tag.has_attr('href'):
+            continue
+        url = link_tag['href']
+
+        # Attempt snippet extraction using multiple fallback methods:
+        description = ''
+
+        # 1. Try known class selectors first
+        snippet_tag = g.select_one('div.IsZvec') or g.select_one('span.aCOpRe')
+        if snippet_tag:
+            description = snippet_tag.get_text(separator=' ', strip=True)
+        else:
+            # 2. As fallback, get all text in container excluding title and link text
+            full_text = g.get_text(separator=' ', strip=True)
+            # Remove title text from full_text
+            description = full_text.replace(title, '').strip()
+
+            # If link text appears inside full_text, also remove it
+            link_text = link_tag.get_text(strip=True)
+            if link_text:
+                description = description.replace(link_text, '').strip()
+
+            # Optionally, trim description length to avoid clutter
+            if len(description) > 300:
+                description = description[:300] + '...'
+
+        # Generate hash for this entry
+        entry_hash = generate_hash(title, url, description)
+
+        results.append({
+            'hash': entry_hash,
+            'name': title,
+            'url': url,
+            'description': description
+        })
+
+    return results
+
+def load_all_html_files(folder_path):
+    pattern = os.path.join(folder_path, '**', '*.html')
+    return glob.glob(pattern, recursive=True)
+
+def extract_all_results(
+    html_folder='./pages',
+    output_file='extracted_results.yaml',
+    output_format='yaml'
+):
+    all_results = []
+
+    html_files = load_all_html_files(html_folder)
+
+    for html_file in html_files:
+        with open(html_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+            extracted = extract_results_from_html(content)
+            all_results.extend(extracted)
+
+    # Deduplicate by URL
+    unique_results = list({r['url']: r for r in all_results}.values())
+
+    if output_format.lower() == 'json':
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(unique_results, f, indent=2, ensure_ascii=False)
+    else:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            yaml.dump(unique_results, f, allow_unicode=True)
+
+    return unique_results
+
+
+file_work.py:
+import os
+import json
+import logging
+import aiohttp
+import asyncio
+import async_timeout
+import traceback
+import random
+from pathlib import Path
+from pdfminer.high_level import extract_text
+from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.198 Safari/537.36",
+]
+
+SEMAPHORE_LIMIT = 5
+RETRY_ATTEMPTS = 3
+TIMEOUT_SECS = 20
+
+async def download_file(session, url, save_path, only_pdf=False, timeout_secs=TIMEOUT_SECS):
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": url,
+        "Connection": "keep-alive",
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1"
+    }
+
+    try:
+        async with async_timeout.timeout(timeout_secs):
+            async with session.get(url, headers=headers, allow_redirects=True, ssl=False) as resp:
+                if resp.status == 200:
+                    content = await resp.read()
+                    content_type = resp.content_type.lower()
+
+                    if only_pdf:
+                        if "pdf" not in content_type:
+                            logger.warning(f"❌ Skipping non-PDF {url}")
+                            return
+                        final_path = save_path if save_path.endswith(".pdf") else save_path + ".pdf"
+                    else:
+                        if "pdf" in content_type or save_path.endswith(".pdf"):
+                            final_path = save_path if save_path.endswith(".pdf") else save_path + ".pdf"
+                        else:
+                            final_path = save_path if save_path.endswith(".html") else save_path + ".html"
+
+                    with open(final_path, "wb") as f:
+                        f.write(content)
+
+                    logger.info(f"✅ Downloaded {final_path} ({content_type})")
+                else:
+                    logger.error(f"❌ Failed to download {url}, HTTP {resp.status}")
+                    raise aiohttp.ClientResponseError(
+                        resp.request_info,
+                        resp.history,
+                        status=resp.status,
+                        message=f"Unexpected content type: {resp.content_type}",
+                        headers=resp.headers
+                    )
+    except asyncio.TimeoutError:
+        logger.error(f"⏱️ Timeout when downloading {url}")
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error downloading {url}: {repr(e)}\n{traceback.format_exc()}")
+        raise
+
+async def download_with_retries(url, save_path, session, semaphore, only_pdf=False):
+    async with semaphore:
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                await asyncio.sleep(random.uniform(1, 3))
+                await download_file(session, url, save_path, only_pdf=only_pdf)
+                return
+            except Exception:
+                logger.warning(f"🔁 Retry {attempt + 1} for {url}")
+        logger.error(f"❌ All retries failed for {url}")
+
+async def download_files_from_ready_candidates(ready_candidates_path, base_pages_folder="pages", only_pdf=False):
+    with open(ready_candidates_path, "r", encoding="utf-8") as f:
+        candidates = json.load(f)
+
+    if only_pdf:
+        file_candidates = [c for c in candidates if c.get("url", "").strip().lower().endswith(".pdf")]
+    else:
+        file_candidates = [c for c in candidates if c.get("url", "").strip().lower().endswith((".pdf", ".html"))]
+
+    if not file_candidates:
+        logger.info("ℹ️ No file URLs found in ready_candidates.json")
+        return
+
+    latest_folder = os.path.dirname(ready_candidates_path)
+    download_folder = os.path.join(latest_folder, "downloads")
+    os.makedirs(download_folder, exist_ok=True)
+
+    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
+
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for entry in file_candidates:
+            url = entry["url"]
+            ext = ".pdf" if url.lower().endswith(".pdf") else ".html"
+            filename = f"{entry['hash']}{ext}"
+            save_path = os.path.join(download_folder, filename)
+            tasks.append(download_with_retries(url, save_path, session, semaphore, only_pdf=only_pdf))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(f"⚠️ Download task {i} raised an exception: {repr(result)}")
+
+    logger.info(f"📥 Attempted to download {len(file_candidates)} files into {download_folder}")
+
+def convert_files_to_text(base_folder, only_pdf=False):
+    download_folder = os.path.join(base_folder, "downloads")
+    txt_folder = os.path.join(base_folder, "txt")
+    os.makedirs(txt_folder, exist_ok=True)
+
+    if only_pdf:
+        files = list(Path(download_folder).glob("*.pdf"))
+    else:
+        files = list(Path(download_folder).glob("*.*"))
+
+    if not files:
+        logger.info("ℹ️ No files found to convert.")
+        return
+
+    for file_path in files:
+        try:
+            text = ""
+            if file_path.suffix.lower() == ".pdf":
+                text = extract_text(str(file_path))
+            else:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    soup = BeautifulSoup(f, "html.parser")
+                    # Optional: extract main content container if exists
+                    main_div = soup.find("div", class_="main-container container-fluid")
+                    text = main_div.get_text(separator="\n", strip=True) if main_div else soup.get_text(separator="\n", strip=True)
+
+            txt_path = os.path.join(txt_folder, f"{file_path.stem}.txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+            logger.info(f"📝 Converted {file_path.name} to text.")
+        except Exception as e:
+            logger.error(f"❌ Error converting {file_path.name} to text: {repr(e)}\n{traceback.format_exc()}")
+
+
+google_scraper.js:
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const RecaptchaPlugin = require('puppeteer-extra-plugin-recaptcha');
+const readline = require('readline');
+const fs = require('fs');
+const yaml = require('js-yaml');
+const path = require('path');
+
+const config = yaml.load(fs.readFileSync('./config.yaml', 'utf8'));
+
+puppeteer.use(StealthPlugin());
+puppeteer.use(
+  RecaptchaPlugin({
+    provider: {
+      id: '2captcha',
+      token: config.twoCaptchaApiKey
+    },
+    visualFeedback: true,
+    solveScoreBased: true,
+    solveInactiveChallenges: true,
+    solveInViewportOnly: false,
+    solveTimeout: 300000
+  })
+);
+
+async function delay(ms, reason = '') {
+  if (reason) console.error(`⏳ Waiting ${ms / 1000}s - ${reason}`);
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function buildSearchUrl(query, start = 0) {
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en-GB&tbs=qdr:d&start=${start}`;
+}
+
+async function scrapeGoogleResults(query, pagesLimitFromInput, folderPath) {
+  // Ensure the target folder exists
+  fs.mkdirSync(folderPath, { recursive: true });
+
+  const browser = await puppeteer.launch({
+    headless: false,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    ],
+    defaultViewport: null,
+    slowMo: 50
+  });
+
+  const page = await browser.newPage();
+  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+
+  page.setDefaultNavigationTimeout(180000);
+  page.setDefaultTimeout(60000);
+
+  const results = [];
+  let currentPage = 0;
+
+  // Use pagesLimitFromInput or fallback to config.maxPages or default 3
+  const maxPages = pagesLimitFromInput || config.maxPages || 3;
+
+  let keepGoing = true;
+
+  try {
+    while (keepGoing) {
+      if (currentPage >= maxPages) {
+        console.error(`🛑 Reached max page limit from input/config (${maxPages}), stopping.`);
+        break;
+      }
+
+      const url = buildSearchUrl(query, currentPage * 10);
+      console.error(`🌐 Navigating to page ${currentPage + 1}: ${url}`);
+
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 180000 });
+      await delay(5000, 'Initial page load');
+
+      // 🔁 CAPTCHA loop
+      let captchaLoopCount = 0;
+      const captchaMaxRetries = 5;
+
+      while (captchaLoopCount < captchaMaxRetries) {
+        const captchaVisible = await page.$('iframe[src*="recaptcha"]') !== null;
+
+        if (!captchaVisible) {
+          console.error('🔓 No CAPTCHA detected, continuing...');
+          break;
+        }
+
+        console.error(`🔒 CAPTCHA detected. Solving attempt ${captchaLoopCount + 1}/${captchaMaxRetries}...`);
+        const { solved, error } = await page.solveRecaptchas().catch(err => ({ solved: [], error: err }));
+
+        if (solved?.length > 0) {
+          console.error(`✅ Solved ${solved.length} CAPTCHA(s)`);
+          await delay(8000, 'Waiting after solving CAPTCHA');
+          // Optionally reload to re-trigger content
+          await page.reload({ waitUntil: 'networkidle2' });
+        } else {
+          console.error(`⚠️ CAPTCHA solve failed: ${error?.message || 'unknown error'}`);
+          await delay(10000, 'Waiting before retry');
+        }
+
+        captchaLoopCount++;
+      }
+
+      if (captchaLoopCount >= captchaMaxRetries) {
+        console.error('❌ Too many CAPTCHA loops, skipping this page.');
+        await page.screenshot({ path: path.join(folderPath, `captcha-failure-page-${currentPage + 1}.png`) });
+        currentPage++;
+        continue;
+      }
+
+      // 🍪 Accept cookie banner if present
+      try {
+        const acceptSelectors = [
+          'div.QS5gu.sy4vM',
+          'div[role="button"]:has-text("Accept all")',
+          'button:has-text("Accept all")',
+          'button:has-text("I agree")',
+          'div[role="button"]:has-text("Akceptuję")',
+          'button[aria-label="Accept all"]',
+        ];
+
+        for (const selector of acceptSelectors) {
+          const btn = await page.$(selector);
+          if (btn) {
+            await btn.click();
+            console.error('🍪 Clicked "Accept all" consent button');
+            await delay(3000, 'Waiting after accepting cookies');
+            break;
+          }
+        }
+      } catch (err) {
+        console.error('⚠️ Cookie consent handling failed:', err.message);
+      }
+
+      // 📝 Save HTML content
+      try {
+        const safeFilename = `google-results-page-${currentPage + 1}.html`;
+        const filePath = path.join(folderPath, safeFilename);
+
+        const htmlContent = await page.content();
+        fs.writeFileSync(filePath, htmlContent, 'utf8');
+
+        console.error(`✅ Saved HTML to ${filePath}`);
+        results.push(filePath);
+      } catch (err) {
+        console.error(`❌ Failed to save HTML: ${err.message}`);
+      }
+
+      // ⏭️ Go to next page if available
+      const nextButton = await page.$('a#pnnext');
+      if (nextButton) {
+        currentPage++;
+        await delay(2000, 'Waiting before next page');
+      } else {
+        console.error('ℹ️ No Next button found, ending pagination.');
+        keepGoing = false;
+      }
+    }
+  } catch (err) {
+    console.error(`❌ Critical error during scraping: ${err.message}`);
+    await page.screenshot({ path: path.join(folderPath, 'error-screenshot.png') });
+  } finally {
+    await browser.close();
+  }
+
+  return results;
+}
+
+// 🧠 CLI entrypoint for Python integration
+async function main() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false
+  });
+
+  let inputData = '';
+  for await (const line of rl) {
+    inputData += line;
+  }
+
+  try {
+    const { query, pages_limit, folder_path } = JSON.parse(inputData);
+    const results = await scrapeGoogleResults(query, pages_limit, folder_path);
+    console.log(JSON.stringify({ success: true, results }));
+  } catch (err) {
+    console.log(JSON.stringify({ success: false, error: err.message }));
+    process.exit(1);
+  }
+}
+
+if (require.main === module) {
+  main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { scrapeGoogleResults };
+
+google_scraper.py:
+import asyncio
+import json
+
+async def scrape_google_links(query: str, pages_limit: int = 1, folder_path: str = None):
+    input_data = {
+        "query": query, 
+        "pages_limit": pages_limit,
+        "folder_path": folder_path
+    }
+    input_json = json.dumps(input_data)
+
+    proc = await asyncio.create_subprocess_exec(
+        "node", "google_scraper.js",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    stdout, stderr = await proc.communicate(input_json.encode())
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"Google scraper failed: {stderr.decode().strip()}")
+
+    try:
+        output = json.loads(stdout.decode())
+        if not output.get("success"):
+            raise RuntimeError("Scraper returned unsuccessful result")
+        return output["results"]  # list of saved file paths
+    except json.JSONDecodeError:
+        raise RuntimeError("Failed to parse Google scraper output")
+
+
+main.py:
+import yaml
+import os
+import asyncio
+import json
+import logging
+import shutil
+import hashlib
+import random
+import string
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from telegram_sender import TelegramSender
+from pathlib import Path
+from google_scraper import scrape_google_links
+from extract_google_results import extract_all_results
+from ai_api import rate_entries_with_gpt
+from file_work import download_files_from_ready_candidates, convert_files_to_text
+from pdf_work import download_pdfs_from_ready_candidates, convert_pdfs_to_text
+from ai_api_final import analyze_txt_file
+
+# ------------------- Logging Setup -------------------
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+file_handler = RotatingFileHandler("main.log", maxBytes=5_000_000, backupCount=5, encoding='utf-8')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
+
+# ------------------- Config Loader -------------------
+def load_config(path="config.yaml"):
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+# ------------------- Analysis -------------------
+async def analyze_all_txts(base_folder):
+    txt_folder = os.path.join(base_folder, "txt")
+    ready_json_path = os.path.join(base_folder, "ready_candidates.json")
+
+    with open(ready_json_path, "r", encoding="utf-8") as f:
+        candidates = json.load(f)
+        hash_entry_map = {item["hash"]: item for item in candidates}
+
+    sender = TelegramSender()
+
+    for txt_file in Path(txt_folder).glob("*.txt"):
+        hash_name = txt_file.stem
+        logger.info(f"🔍 Analyzing: {hash_name}.txt")
+
+        entry = hash_entry_map.get(hash_name)
+        if not entry:
+            logger.warning(f"⚠️ No matching entry in ready_candidates.json for hash: {hash_name}")
+            continue
+
+        try:
+            result = await analyze_txt_file(str(txt_file))
+            if result:
+                entry["result"] = result
+                await sender.send_filing_result(result, entry["url"])
+        except Exception as e:
+            logger.error(f"❌ Error processing {txt_file.name}: {e}")
+
+    with open(ready_json_path, "w", encoding="utf-8") as f:
+        json.dump(list(hash_entry_map.values()), f, indent=2, ensure_ascii=False)
+
+    logger.info(f"💾 Updated ready_candidates.json with analysis results")
+
+# ------------------- Ready Candidates -------------------
+def save_ready_candidates(combined_results_path, ratings_path, output_path, threshold=5):
+    with open(combined_results_path, "r", encoding="utf-8") as f:
+        combined_results = json.load(f)
+    with open(ratings_path, "r", encoding="utf-8") as f:
+        ratings = json.load(f)
+    ready_candidates = [
+        entry for entry in combined_results
+        if ratings.get(entry.get("hash"), 0) >= threshold
+    ]
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(ready_candidates, f, indent=2, ensure_ascii=False)
+    logger.info(f"✅ Saved {len(ready_candidates)} ready candidates with rating >= {threshold} to {output_path}")
+
+# ------------------- Main Async -------------------
+# ------------------- Main Async -------------------
+async def async_main():
+    config = load_config()
+    queries = config.get("google", {}).get("queries")
+    if not queries:
+        default_query = config.get("google", {}).get("query", 'site:*.com filetype:pdf investment memo')
+        queries = [default_query]
+
+    download_type = config.get("download_type", "pdf")  # 'pdf' or 'page'
+
+    # Generate a single hash for this run
+    import hashlib
+    import random
+    import string
+
+    random_str = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    run_hash = hashlib.md5(random_str.encode()).hexdigest()[:8]
+
+    logger.info(f"🔍 Running Google search for queries: {queries} with download_type='{download_type}' and hash={run_hash}")
+
+    pages_limit = config.get("google", {}).get("pages_limit", 1)
+    per_query_folders = []
+
+    # ------------------- Process Each Query -------------------
+    for query in queries:
+        timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        query_folder = Path("pages") / f"{timestamp}-{run_hash}"
+        query_folder.mkdir(parents=True, exist_ok=True)
+        per_query_folders.append(query_folder)
+
+        logger.info(f"\n🔍 Searching Google for: '{query}' -> saving to {query_folder}")
+        try:
+            html_files = await scrape_google_links(query=query, pages_limit=pages_limit, folder_path=str(query_folder))
+            if html_files:
+                for i, html_path in enumerate(html_files):
+                    orig_name = Path(html_path).name
+                    dest_name = f"{Path(orig_name).stem}_{i}{Path(orig_name).suffix}"
+                    dest_path = query_folder / dest_name
+                    shutil.copy(html_path, dest_path)
+                logger.info(f"✅ Saved {len(html_files)} HTML page(s) to {query_folder}")
+            else:
+                logger.info(f"❌ No pages saved for query: '{query}'")
+        except Exception as e:
+            logger.error(f"❌ Error running query '{query}': {e}")
+
+    # ------------------- Combine All Queries Into Single Run Folder -------------------
+    combined_folder = Path("pages") / run_hash
+    combined_folder.mkdir(parents=True, exist_ok=True)
+    all_html_paths = []
+
+    for folder in per_query_folders:
+        for file_path in folder.glob("*"):
+            if file_path.is_file():
+                unique_name = f"{file_path.stem}_{random.randint(0,9999)}{file_path.suffix}"
+                shutil.copy(file_path, combined_folder / unique_name)
+                all_html_paths.append(combined_folder / unique_name)
+
+    if not all_html_paths:
+        logger.info("ℹ️ No new HTML files generated.")
+        return
+
+    logger.info(f"🆕 Combined {len(all_html_paths)} HTML file(s) into {combined_folder}")
+
+    # ------------------- Extraction and Processing -------------------
+    combined_json_path = combined_folder / "combined_results.json"
+    extracted = extract_all_results(html_folder=combined_folder, output_file=combined_json_path, output_format='json')
+    logger.info(f"✅ Extracted {len(extracted)} unique results into {combined_json_path}")
+
+    logger.info("🤖 Sending results to OpenAI for investment relevance rating...")
+    ratings = await rate_entries_with_gpt(extracted)
+
+    ratings_file = combined_folder / "ratings.json"
+    with open(ratings_file, "w", encoding="utf-8") as f:
+        json.dump(ratings, f, indent=2, ensure_ascii=False)
+    logger.info(f"📊 Saved ratings to {ratings_file}")
+
+    ready_candidates_file = combined_folder / "ready_candidates.json"
+    save_ready_candidates(combined_json_path, ratings_file, ready_candidates_file)
+
+    # Download and convert depending on type
+    if download_type == "pdf":
+        await download_pdfs_from_ready_candidates(str(ready_candidates_file))
+        convert_pdfs_to_text(combined_folder)
+    else:  # any page
+        await download_files_from_ready_candidates(str(ready_candidates_file))
+        convert_files_to_text(combined_folder)
+
+    await analyze_all_txts(combined_folder)
+
+# ------------------- Entry Point -------------------
+def main():
+    asyncio.run(async_main())
+
+if __name__ == "__main__":
+    main()
+
+
+pdf_work.py:
+import os
+import json
+import logging
+import aiohttp
+import asyncio
+import async_timeout
+import traceback
+import random
+from pathlib import Path
+from pdfminer.high_level import extract_text
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.198 Safari/537.36",
+]
+
+SEMAPHORE_LIMIT = 5
+RETRY_ATTEMPTS = 3
+TIMEOUT_SECS = 20
+
+
+async def download_pdf(session, url, save_path, timeout_secs=TIMEOUT_SECS):
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": url,
+        "Connection": "keep-alive",
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1"
+    }
+
+    try:
+        async with async_timeout.timeout(timeout_secs):
+            async with session.get(url, headers=headers, allow_redirects=True, ssl=False) as resp:
+                if resp.status == 200 and "application/pdf" in resp.content_type:
+                    content = await resp.read()
+                    with open(save_path, "wb") as f:
+                        f.write(content)
+                    logger.info(f"✅ Downloaded PDF: {save_path}")
+                else:
+                    logger.error(f"❌ Failed to download {url}, HTTP {resp.status}, Content-Type: {resp.content_type}")
+                    raise aiohttp.ClientResponseError(
+                        resp.request_info,
+                        resp.history,
+                        status=resp.status,
+                        message=f"Unexpected content type: {resp.content_type}",
+                        headers=resp.headers
+                    )
+    except asyncio.TimeoutError:
+        logger.error(f"⏱️ Timeout when downloading {url}")
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error downloading {url}: {repr(e)}\n{traceback.format_exc()}")
+        raise
+
+
+async def download_with_retries(url, save_path, session, semaphore):
+    async with semaphore:
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                await asyncio.sleep(random.uniform(1, 3))  # random delay between attempts
+                await download_pdf(session, url, save_path)
+                return
+            except Exception:
+                logger.warning(f"🔁 Retry {attempt + 1} for {url}")
+        logger.error(f"❌ All retries failed for {url}")
+
+
+async def download_pdfs_from_ready_candidates(ready_candidates_path, base_pages_folder="pages"):
+    with open(ready_candidates_path, "r", encoding="utf-8") as f:
+        candidates = json.load(f)
+
+    pdf_candidates = [c for c in candidates if c.get("url", "").strip().lower().endswith(".pdf")]
+    if not pdf_candidates:
+        logger.info("ℹ️ No PDF URLs found in ready_candidates.json")
+        return
+
+    latest_folder = os.path.dirname(ready_candidates_path)
+    pdf_folder = os.path.join(latest_folder, "pdf")
+    os.makedirs(pdf_folder, exist_ok=True)
+
+    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
+
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for entry in pdf_candidates:
+            url = entry["url"]
+            filename = f"{entry['hash']}.pdf"
+            save_path = os.path.join(pdf_folder, filename)
+            tasks.append(download_with_retries(url, save_path, session, semaphore))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(f"⚠️ Download task {i} raised an exception: {repr(result)}")
+
+    logger.info(f"📥 Attempted to download {len(pdf_candidates)} PDFs into {pdf_folder}")
+
+
+def convert_pdfs_to_text(base_folder):
+    pdf_folder = os.path.join(base_folder, "pdf")
+    txt_folder = os.path.join(base_folder, "txt")
+    os.makedirs(txt_folder, exist_ok=True)
+
+    pdf_files = list(Path(pdf_folder).glob("*.pdf"))
+    if not pdf_files:
+        logger.info("ℹ️ No PDFs found to convert.")
+        return
+
+    for pdf_file in pdf_files:
+        try:
+            text = extract_text(str(pdf_file))
+            txt_path = os.path.join(txt_folder, f"{pdf_file.stem}.txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            logger.info(f"📝 Converted {pdf_file.name} to text.")
+        except Exception as e:
+            logger.error(f"❌ Error converting {pdf_file.name} to text: {repr(e)}\n{traceback.format_exc()}")
+
+
+telegram_sender.py:
+import os
+import logging
+import asyncio
+import yaml
+from telegram import Bot
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def load_config(path="config.yaml"):
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+class TelegramSender:
+    def __init__(self, token=None, chat_id=None):
+        config = load_config()
+        self.token = token or config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN")
+        self.chat_id = chat_id or config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID")
+        if not self.token or not self.chat_id:
+            logger.error("Telegram bot token or chat ID missing!")
+            raise ValueError("Telegram bot token and chat ID must be provided")
+        self.bot = Bot(token=self.token)
+
+    async def send_filing_result(self, result: str, url: str):
+        """
+        Sends the summarized investment opportunity to Telegram with the original source URL.
+        Skips sending if result is empty or just 'X'.
+        """
+        if not result or result.strip() == 'X':
+            logger.info("Result is empty or 'X'; skipping Telegram message.")
+            return
+
+        message = f"✨\n\n{result}\n\n🔗 URL\n{url}"
+
+        try:
+            await self.bot.send_message(chat_id=self.chat_id, text=message)
+            logger.info(f"✅ Sent Telegram message for URL: {url}")
+        except Exception as e:
+            logger.error(f"❌ Failed to send Telegram message: {e}")
+
