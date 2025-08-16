@@ -1,10 +1,12 @@
 telegram_bot_token: "x"
 telegram_chat_id: "-0"
+download_type: pdf # 'pdf' or 'page'
 google:
   queries:
     - '("seeking funding" OR "raising capital" OR "investment opportunity" OR "raising funds" OR "Series A" OR "Series B" OR "Series C" OR "Series D" OR "pitch deck" OR "investor deck" OR "investment memo" OR "confidential investor deck") filetype:pdf (site:*.com OR site:*.org OR site:*.ai OR site:*.io OR site:*.xyz OR site:*.network OR site:*.tech OR site:*.app OR site:*.finance OR site:*.capital OR site:*.fund OR site:*.ventures OR site:*.foundation OR site:*.global OR site:*.vc OR site:*.co OR site:*.co.uk)'
     #- '("seeking funding" OR "raising capital" OR "investment opportunity" OR "raising funds" OR "Series A" OR "Series B" OR "Series C" OR "Series D" OR "pitch deck" OR "investor deck" OR "investment memo" OR "confidential investor deck" OR "mergers and acquisitions" OR "M&A opportunity" OR "M&A deal" OR "acquisition opportunity" OR "strategic acquisition" OR "merger proposal" OR "acquisition proposal" OR "company for sale" OR "sell-side mandate" OR "buy-side mandate" OR "investment teaser" OR "confidential information memorandum" OR "CIM" OR "deal overview" OR "transaction memo") filetype:pdf (site:*.com OR site:*.org OR site:*.ai OR site:*.io OR site:*.xyz OR site:*.network OR site:*.tech OR site:*.app OR site:*.finance OR site:*.capital OR site:*.fund OR site:*.ventures OR site:*.foundation OR site:*.global OR site:*.vc OR site:*.co OR site:*.co.uk)'
   pages_limit: 7
+  time_range: "day" # Options: "day", "week", "month", "year", or null for any time
 openai:
   api_key: "sk-x"
 twoCaptchaApiKey: "x"
@@ -42,3 +44,14 @@ prompt: |
   - ...
 
   Who to contact: [e.g. "Company directly", "Placement agent mentioned", "No contact listed"]
+prompt0: |
+  You are a financial analyst. Rate each item below from 1 to 10
+  based on how likely it is that the linked PDF describes an investment opportunity.
+  We are interested in investment opportunties that are $1M+.
+
+  Respond ONLY in strict JSON format like:
+  {
+    "hash1": 7,
+    "hash2": 2,
+    ...
+  }

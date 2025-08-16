@@ -28,8 +28,25 @@ async function delay(ms, reason = '') {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function buildSearchUrl(query, start = 0) {
-  return `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en-GB&tbs=qdr:d&start=${start}`;
+function buildSearchUrl(query, start = 0, timeRange = null) {
+  let baseUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en-GB`;
+  
+  // Add time range parameter if specified
+  if (timeRange) {
+    const tbsMap = {
+      "day": "qdr:d",
+      "week": "qdr:w",
+      "month": "qdr:m",
+      "year": "qdr:y"
+    };
+    
+    if (tbsMap[timeRange]) {
+      baseUrl += `&tbs=${tbsMap[timeRange]}`;
+    }
+  }
+  
+  baseUrl += `&start=${start}`;
+  return baseUrl;
 }
 
 async function scrapeGoogleResults(query, pagesLimitFromInput, folderPath) {
@@ -69,8 +86,8 @@ async function scrapeGoogleResults(query, pagesLimitFromInput, folderPath) {
         break;
       }
 
-      const url = buildSearchUrl(query, currentPage * 10);
-      console.error(`🌐 Navigating to page ${currentPage + 1}: ${url}`);
+      const url = buildSearchUrl(query, currentPage * 10, timeRange);
+      console.error(`🌐 Navigating to page ${currentPage + 1} (time range: ${timeRange || 'any'}): ${url}`);
 
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 180000 });
       await delay(5000, 'Initial page load');
@@ -183,7 +200,8 @@ async function main() {
 
   try {
     const { query, pages_limit, folder_path } = JSON.parse(inputData);
-    const results = await scrapeGoogleResults(query, pages_limit, folder_path);
+    const timeRange = config.google?.time_range || null;
+    const results = await scrapeGoogleResults(query, pages_limit, folder_path, timeRange);
     console.log(JSON.stringify({ success: true, results }));
   } catch (err) {
     console.log(JSON.stringify({ success: false, error: err.message }));
