@@ -118,7 +118,7 @@ NEW SUMMARY:
 {new_text}
 
 OLD SUMMARIES:
-{"\n\n---\n\n".join(old_texts)}
+{chr(10).join(old_texts)}
 """
 
     config = load_config()
