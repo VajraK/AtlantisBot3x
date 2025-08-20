@@ -17,6 +17,7 @@ from ai_api import rate_entries_with_gpt
 from file_work import download_files_from_ready_candidates, convert_files_to_text
 from pdf_work import download_pdfs_from_ready_candidates, convert_pdfs_to_text
 from ai_api_final import analyze_txt_file
+from duplicate_checker import is_duplicate
 
 # ------------------- Logging Setup -------------------
 logger = logging.getLogger(__name__)
@@ -62,6 +63,13 @@ async def analyze_all_txts(base_folder):
         try:
             result = await analyze_txt_file(str(txt_file))
             if result:
+                # Check for duplicates before proceeding
+                is_dup = await is_duplicate(result, entry["hash"])
+                if is_dup:
+                    logger.info(f"🚫 Skipping duplicate: {hash_name}")
+                    entry["result"] = "X"  # Mark as duplicate
+                    continue
+                    
                 entry["result"] = result
                 await sender.send_filing_result(result, entry["url"])
         except Exception as e:
